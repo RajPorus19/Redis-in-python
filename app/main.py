@@ -371,6 +371,12 @@ def _handle_lpop(connection: socket.socket, array: list) -> None:
         connection.sendall(_encode_bulk_string(None))
         return
     list_key = bytes(list_key_raw)
+    index = 0
+    if len(array) > 2:
+        index_raw = array[2]
+        if not isinstance(index_raw, (bytes, bytearray)):
+            index = 0
+        index = int(bytes(index_raw))
     with _list_lock:
         lst = _list_store.get(list_key)
         if lst is None:
@@ -379,7 +385,7 @@ def _handle_lpop(connection: socket.socket, array: list) -> None:
         if not lst:
             connection.sendall(_encode_bulk_string(None))
             return
-        element = lst.pop(0)
+        element = lst.pop(index)
         connection.sendall(_encode_bulk_string(element))
 
 
