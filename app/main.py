@@ -118,8 +118,15 @@ def _encode_bulk_string(b: bytes | None) -> bytes:
     return b"$" + str(len(b)).encode() + b"\r\n" + b + b"\r\n"
 
 
-def _encode_array(a: list[bytes]) -> bytes:
-    return b"*" + str(len(a)).encode() + b"\r\n" + b"\r\n".join(a) + b"\r\n"
+def _encode_array(elements: list[bytes]) -> bytes:
+    # RESP arrays: *<len>\r\n then each element as bulk string
+    count = len(elements)
+    if count == 0:
+        return b"*0\r\n"
+    parts = [b"*" + str(count).encode() + b"\r\n"]
+    for e in elements:
+        parts.append(_encode_bulk_string(e))
+    return b"".join(parts)
 
 
 def _encode_integer(n: int) -> bytes:
@@ -287,20 +294,36 @@ def _handle_rpush(connection: socket.socket, array: list) -> None:
 
 def _handle_lrange(connection: socket.socket, array: list) -> None:
     if len(array) < 4:
-        connection.sendall(_encode_bulk_string(None))
+        connection.sendall(_encode_array([]))
         return
     list_key_raw = array[1]
     start_raw = array[2]
     end_raw = array[3]
+    if not isinstance(list_key_raw, (bytes, bytearray)):
+        connection.sendall(_encode_array([]))
+        return
+    # Convert indexes; assume valid integers per stage requirements
     start = int(start_raw)
     end = int(end_raw)
     list_key = bytes(list_key_raw)
     with _list_lock:
         lst = _list_store.get(list_key)
         if lst is None:
-            connection.sendall(_encode_bulk_string(None))
+            connection.sendall(_encode_array([]))
             return
-        range_list = lst[start:end]
+        n = len(lst)
+        # Clamp indices for positive index stage, inclusive end
+        if start < 0:
+            start = 0
+        if end < 0:
+            connection.sendall(_encode_array([]))
+            return
+        if start >= n or end < 0 or start > end:
+            connection.sendall(_encode_array([]))
+            return
+        if end >= n:
+            end = n - 1
+        range_list = lst[start : end + 1]
         connection.sendall(_encode_array(range_list))
 
 
