@@ -1,6 +1,10 @@
 import socket
 import threading
 
+# In-memory key-value store for SET/GET
+_kv_store: dict[bytes, bytes] = {}
+_kv_lock = threading.Lock()
+
 
 def _find_crlf(data: bytearray, start: int) -> int:
     idx = data.find(b"\r\n", start)
@@ -122,6 +126,51 @@ def _consume_next_frame(buffer: bytearray):
     return frame
 
 
+def _handle_ping(connection: socket.socket) -> None:
+    connection.sendall(_encode_simple_string(b"PONG"))
+
+
+def _handle_echo(connection: socket.socket, array: list) -> None:
+    arg = array[1] if len(array) >= 2 else None
+    if isinstance(arg, (bytes, bytearray)):
+        connection.sendall(_encode_bulk_string(bytes(arg)))
+    else:
+        connection.sendall(_encode_bulk_string(None))
+
+
+def _handle_set(connection: socket.socket, array: list) -> None:
+    if len(array) < 3:
+        # Minimal error handling: reply OK to stay permissive
+        connection.sendall(_encode_simple_string(b"OK"))
+        return
+    key_raw = array[1]
+    val_raw = array[2]
+    if isinstance(key_raw, (bytes, bytearray)) and isinstance(
+        val_raw, (bytes, bytearray)
+    ):
+        key = bytes(key_raw)
+        value = bytes(val_raw)
+        with _kv_lock:
+            _kv_store[key] = value
+        connection.sendall(_encode_simple_string(b"OK"))
+    else:
+        connection.sendall(_encode_simple_string(b"OK"))
+
+
+def _handle_get(connection: socket.socket, array: list) -> None:
+    if len(array) < 2:
+        connection.sendall(_encode_bulk_string(None))
+        return
+    key_raw = array[1]
+    if isinstance(key_raw, (bytes, bytearray)):
+        key = bytes(key_raw)
+        with _kv_lock:
+            value = _kv_store.get(key)
+        connection.sendall(_encode_bulk_string(value if value is not None else None))
+    else:
+        connection.sendall(_encode_bulk_string(None))
+
+
 def _dispatch_array_command(connection: socket.socket, array: list) -> None:
     """Handle RESP Array-based commands like PING and ECHO."""
     if not array:
@@ -132,15 +181,19 @@ def _dispatch_array_command(connection: socket.socket, array: list) -> None:
     cmd = bytes(cmd_raw).upper()
 
     if cmd == b"PING":
-        connection.sendall(_encode_simple_string(b"PONG"))
+        _handle_ping(connection)
         return
 
     if cmd == b"ECHO" and len(array) >= 2:
-        arg = array[1]
-        if isinstance(arg, (bytes, bytearray)):
-            connection.sendall(_encode_bulk_string(bytes(arg)))
-        else:
-            connection.sendall(_encode_bulk_string(None))
+        _handle_echo(connection, array)
+        return
+
+    if cmd == b"SET" and len(array) >= 3:
+        _handle_set(connection, array)
+        return
+
+    if cmd == b"GET" and len(array) >= 2:
+        _handle_get(connection, array)
         return
 
 
