@@ -118,6 +118,10 @@ def _encode_bulk_string(b: bytes | None) -> bytes:
     return b"$" + str(len(b)).encode() + b"\r\n" + b + b"\r\n"
 
 
+def _encode_array(a: list[bytes]) -> bytes:
+    return b"*" + str(len(a)).encode() + b"\r\n" + b"\r\n".join(a) + b"\r\n"
+
+
 def _encode_integer(n: int) -> bytes:
     return b":" + str(n).encode() + b"\r\n"
 
@@ -281,6 +285,25 @@ def _handle_rpush(connection: socket.socket, array: list) -> None:
     connection.sendall(_encode_integer(new_len))
 
 
+def _handle_lrange(connection: socket.socket, array: list) -> None:
+    if len(array) < 4:
+        connection.sendall(_encode_bulk_string(None))
+        return
+    list_key_raw = array[1]
+    start_raw = array[2]
+    end_raw = array[3]
+    start = int(start_raw)
+    end = int(end_raw)
+    list_key = bytes(list_key_raw)
+    with _list_lock:
+        lst = _list_store.get(list_key)
+        if lst is None:
+            connection.sendall(_encode_bulk_string(None))
+            return
+        range_list = lst[start:end]
+        connection.sendall(_encode_array(range_list))
+
+
 def _dispatch_array_command(connection: socket.socket, array: list) -> None:
     """Handle RESP Array-based commands like PING and ECHO."""
     if not array:
@@ -308,6 +331,10 @@ def _dispatch_array_command(connection: socket.socket, array: list) -> None:
 
     if cmd == b"RPUSH" and len(array) >= 3:
         _handle_rpush(connection, array)
+        return
+
+    if cmd == b"LRANGE" and len(array) >= 4:
+        _handle_lrange(connection, array)
         return
 
 
