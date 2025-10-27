@@ -371,22 +371,36 @@ def _handle_lpop(connection: socket.socket, array: list) -> None:
         connection.sendall(_encode_bulk_string(None))
         return
     list_key = bytes(list_key_raw)
-    index = 0
+    count: int | None = None
     if len(array) > 2:
-        index_raw = array[2]
-        if not isinstance(index_raw, (bytes, bytearray)):
-            index = 0
-        index = int(bytes(index_raw))
+        count_raw = array[2]
+        if isinstance(count_raw, (bytes, bytearray)):
+            try:
+                count = int(bytes(count_raw))
+            except ValueError:
+                count = None
     with _list_lock:
         lst = _list_store.get(list_key)
-        if lst is None:
-            connection.sendall(_encode_bulk_string(None))
+        if lst is None or len(lst) == 0:
+            if count is not None:
+                connection.sendall(_encode_array([]))
+            else:
+                connection.sendall(_encode_bulk_string(None))
             return
-        if not lst:
-            connection.sendall(_encode_bulk_string(None))
+        if count is None:
+            # Pop a single element from head
+            element = lst.pop(0)
+            connection.sendall(_encode_bulk_string(element))
             return
-        element = lst.pop(index)
-        connection.sendall(_encode_bulk_string(element))
+        # Pop multiple from head, return array
+        if count <= 0:
+            connection.sendall(_encode_array([]))
+            return
+        num_to_pop = min(count, len(lst))
+        popped: list[bytes] = []
+        for _ in range(num_to_pop):
+            popped.append(lst.pop(0))
+        connection.sendall(_encode_array(popped))
 
 
 def _dispatch_array_command(connection: socket.socket, array: list) -> None:
