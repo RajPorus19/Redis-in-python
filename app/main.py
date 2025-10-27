@@ -424,6 +424,10 @@ def _dispatch_array_command(connection: socket.socket, array: list) -> None:
         _handle_llen(connection, array)
         return
 
+    if cmd == b"LPOP" and len(array) >= 2:
+        _handle_lpop(connection, array)
+        return
+
 
 def _process_frame(connection: socket.socket, frame) -> None:
     """Process a single RESP frame and respond if it's a recognized command."""
