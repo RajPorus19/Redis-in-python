@@ -311,6 +311,20 @@ def _handle_lrange(connection: socket.socket, array: list) -> None:
         if lst is None:
             connection.sendall(_encode_array([]))
             return
+        n = len(lst)
+        # Translate negative indexes from the end of list
+        if start < 0:
+            start = n + start
+        if end < 0:
+            end = n + end
+        # Clamp to valid bounds
+        if start < 0:
+            start = 0
+        if end >= n:
+            end = n - 1
+        if start > end or n == 0:
+            connection.sendall(_encode_array([]))
+            return
         range_list = lst[start : end + 1]
         connection.sendall(_encode_array(range_list))
 
