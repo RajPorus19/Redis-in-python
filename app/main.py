@@ -344,6 +344,24 @@ def _handle_lrange(connection: socket.socket, array: list) -> None:
         connection.sendall(_encode_array(range_list))
 
 
+def _handle_llen(connection: socket.socket, array: list) -> None:
+    if len(array) < 2:
+        connection.sendall(_encode_integer(0))
+        return
+    list_key_raw = array[1]
+    if not isinstance(list_key_raw, (bytes, bytearray)):
+        connection.sendall(_encode_integer(0))
+        return
+    list_key = bytes(list_key_raw)
+    with _list_lock:
+        lst = _list_store.get(list_key)
+        if lst is None:
+            connection.sendall(_encode_integer(0))
+            return
+        length = len(lst)
+        connection.sendall(_encode_integer(length))
+
+
 def _dispatch_array_command(connection: socket.socket, array: list) -> None:
     """Handle RESP Array-based commands like PING and ECHO."""
     if not array:
