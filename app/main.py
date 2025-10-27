@@ -240,11 +240,11 @@ def _handle_get(connection: socket.socket, array: list) -> None:
 
 
 def _handle_rpush(connection: socket.socket, array: list) -> None:
-    """Handle RPUSH for creating a new list with a single element.
+    """Handle RPUSH for creating/appending with one or more elements.
 
-    This stage only requires supporting RPUSH <key> <element> when the list may
-    not exist yet. We create the list if absent and append one element, then
-    return the resulting length as a RESP integer.
+    Supports: RPUSH <key> <element1> [element2 ...].
+    Creates the list if it does not exist and appends all provided elements.
+    Returns the resulting length as a RESP integer.
     """
     if len(array) < 3:
         # Minimal handling: reply with 0 as integer
@@ -252,22 +252,30 @@ def _handle_rpush(connection: socket.socket, array: list) -> None:
         return
 
     key_raw = array[1]
-    val_raw = array[2]
-    if not isinstance(key_raw, (bytes, bytearray)) or not isinstance(
-        val_raw, (bytes, bytearray)
-    ):
+    # Collect all valid byte-like elements from position 2 onwards
+    values_raw = array[2:]
+    if not isinstance(key_raw, (bytes, bytearray)):
+        connection.sendall(_encode_integer(0))
+        return
+
+    # Filter to byte-like values and convert to bytes
+    elements: list[bytes] = []
+    for v in values_raw:
+        if isinstance(v, (bytes, bytearray)):
+            elements.append(bytes(v))
+
+    if not elements:
         connection.sendall(_encode_integer(0))
         return
 
     key = bytes(key_raw)
-    value = bytes(val_raw)
 
     with _list_lock:
         lst = _list_store.get(key)
         if lst is None:
             lst = []
             _list_store[key] = lst
-        lst.append(value)
+        lst.extend(elements)
         new_len = len(lst)
 
     connection.sendall(_encode_integer(new_len))
