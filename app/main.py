@@ -379,7 +379,7 @@ def _handle_lpop(connection: socket.socket, array: list) -> None:
         if not lst:
             connection.sendall(_encode_bulk_string(None))
             return
-        element = lst.pop()
+        element = lst.pop(0)
         connection.sendall(_encode_bulk_string(element))
 
 
