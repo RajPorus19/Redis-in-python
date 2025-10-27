@@ -251,7 +251,7 @@ def _handle_get(connection: socket.socket, array: list) -> None:
 
 
 def _handle_push(connection: socket.socket, array: list, command: str) -> None:
-    """Handle RPUSH for creating/appending with one or more elements.
+    """Handle RPUSH/LPUSH for creating/appending with one or more elements.
 
     Supports: RPUSH <key> <element1> [element2 ...].
     Creates the list if it does not exist and appends all provided elements.
@@ -289,7 +289,9 @@ def _handle_push(connection: socket.socket, array: list, command: str) -> None:
         if command == "RPUSH":
             lst.extend(elements)
         elif command == "LPUSH":
-            lst.insert(0, elements)
+            # Prepend each element in the order provided by the client
+            for e in elements:
+                lst.insert(0, e)
         else:
             raise ValueError(f"Unknown command: {command}")
         new_len = len(lst)
