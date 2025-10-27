@@ -7,6 +7,10 @@ _kv_store: dict[bytes, bytes] = {}
 _kv_expiry: dict[bytes, float] = {}
 _kv_lock = threading.Lock()
 
+# In-memory list store for RPUSH
+_list_store: dict[bytes, list[bytes]] = {}
+_list_lock = threading.Lock()
+
 
 def _find_crlf(data: bytearray, start: int) -> int:
     idx = data.find(b"\r\n", start)
@@ -112,6 +116,10 @@ def _encode_bulk_string(b: bytes | None) -> bytes:
     if b is None:
         return b"$-1\r\n"
     return b"$" + str(len(b)).encode() + b"\r\n" + b + b"\r\n"
+
+
+def _encode_integer(n: int) -> bytes:
+    return b":" + str(n).encode() + b"\r\n"
 
 
 def _consume_next_frame(buffer: bytearray):
@@ -231,6 +239,40 @@ def _handle_get(connection: socket.socket, array: list) -> None:
         connection.sendall(_encode_bulk_string(None))
 
 
+def _handle_rpush(connection: socket.socket, array: list) -> None:
+    """Handle RPUSH for creating a new list with a single element.
+
+    This stage only requires supporting RPUSH <key> <element> when the list may
+    not exist yet. We create the list if absent and append one element, then
+    return the resulting length as a RESP integer.
+    """
+    if len(array) < 3:
+        # Minimal handling: reply with 0 as integer
+        connection.sendall(_encode_integer(0))
+        return
+
+    key_raw = array[1]
+    val_raw = array[2]
+    if not isinstance(key_raw, (bytes, bytearray)) or not isinstance(
+        val_raw, (bytes, bytearray)
+    ):
+        connection.sendall(_encode_integer(0))
+        return
+
+    key = bytes(key_raw)
+    value = bytes(val_raw)
+
+    with _list_lock:
+        lst = _list_store.get(key)
+        if lst is None:
+            lst = []
+            _list_store[key] = lst
+        lst.append(value)
+        new_len = len(lst)
+
+    connection.sendall(_encode_integer(new_len))
+
+
 def _dispatch_array_command(connection: socket.socket, array: list) -> None:
     """Handle RESP Array-based commands like PING and ECHO."""
     if not array:
@@ -254,6 +296,10 @@ def _dispatch_array_command(connection: socket.socket, array: list) -> None:
 
     if cmd == b"GET" and len(array) >= 2:
         _handle_get(connection, array)
+        return
+
+    if cmd == b"RPUSH" and len(array) >= 3:
+        _handle_rpush(connection, array)
         return
 
 
