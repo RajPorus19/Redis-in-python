@@ -11,6 +11,10 @@ _kv_lock = threading.Lock()
 _list_store: dict[bytes, list[bytes]] = {}
 _list_lock = threading.Lock()
 
+# BLPOP waiters per list key (FIFO): key -> list of (connection, event)
+_blpop_waiters: dict[bytes, list[tuple[socket.socket, threading.Event]]] = {}
+_blpop_lock = threading.Lock()
+
 
 def _find_crlf(data: bytearray, start: int) -> int:
     idx = data.find(b"\r\n", start)
@@ -131,6 +135,10 @@ def _encode_array(elements: list[bytes]) -> bytes:
 
 def _encode_integer(n: int) -> bytes:
     return b":" + str(n).encode() + b"\r\n"
+
+
+def _encode_null_array() -> bytes:
+    return b"*-1\r\n"
 
 
 def _consume_next_frame(buffer: bytearray):
@@ -296,7 +304,13 @@ def _handle_push(connection: socket.socket, array: list, command: str) -> None:
             raise ValueError(f"Unknown command: {command}")
         new_len = len(lst)
 
+    # Send push result first (should reflect length after push)
     connection.sendall(_encode_integer(new_len))
+
+    # After responding to pusher, try waking BLPOP waiters (one per pushed element)
+    for _ in range(len(elements)):
+        if not _try_wake_blpop_waiter(key):
+            break
 
 
 def _handle_rpush(connection: socket.socket, array: list) -> None:
@@ -403,6 +417,90 @@ def _handle_lpop(connection: socket.socket, array: list) -> None:
         connection.sendall(_encode_array(popped))
 
 
+def _handle_blpop(connection: socket.socket, array: list) -> None:
+    # Expect: BLPOP <key> <timeout>
+    if len(array) < 3:
+        connection.sendall(_encode_null_array())
+        return
+    key_raw = array[1]
+    timeout_raw = array[2]
+    if not isinstance(key_raw, (bytes, bytearray)):
+        connection.sendall(_encode_null_array())
+        return
+    key = bytes(key_raw)
+    # Per stage, timeout will be 0 (block indefinitely). Parse but ignore non-zero.
+    try:
+        timeout = int(
+            bytes(timeout_raw)
+            if isinstance(timeout_raw, (bytes, bytearray))
+            else timeout_raw
+        )
+    except Exception:
+        timeout = 0
+
+    # Fast-path: if element exists, pop immediately
+    with _list_lock:
+        lst = _list_store.get(key)
+        if lst:
+            value = lst.pop(0)
+            connection.sendall(_encode_array([key, value]))
+            return
+
+    # Otherwise, register as waiter and block indefinitely (timeout==0)
+    event = threading.Event()
+    with _blpop_lock:
+        waiters = _blpop_waiters.get(key)
+        if waiters is None:
+            waiters = []
+            _blpop_waiters[key] = waiters
+        waiters.append((connection, event))
+
+    # Wait until a pusher wakes us (response will be sent by the waker)
+    if timeout == 0:
+        event.wait()
+        return
+    # For non-zero timeouts (future stages), we could wait with timeout
+    signaled = event.wait(timeout=max(0, timeout))
+    if not signaled:
+        # Timed out: remove ourselves if still queued and reply with null array
+        with _blpop_lock:
+            waiters = _blpop_waiters.get(key)
+            if waiters is not None:
+                try:
+                    waiters.remove((connection, event))
+                except ValueError:
+                    pass
+        connection.sendall(_encode_null_array())
+
+
+def _try_wake_blpop_waiter(key: bytes) -> bool:
+    # Attempt to wake the earliest waiter for this key by popping one value
+    # from the head and sending [key, value]. Returns True if someone was woken.
+    # Step 1: get waiter if any
+    with _blpop_lock:
+        waiters = _blpop_waiters.get(key)
+        if not waiters:
+            return False
+        waiter_conn, waiter_event = waiters.pop(0)
+    # Step 2: pop one value from list head
+    with _list_lock:
+        lst = _list_store.get(key)
+        if not lst:
+            # No value available; push waiter back and abort
+            with _blpop_lock:
+                _blpop_waiters.setdefault(key, []).insert(
+                    0, (waiter_conn, waiter_event)
+                )
+            return False
+        value = lst.pop(0)
+    # Step 3: respond to waiter and signal event
+    try:
+        waiter_conn.sendall(_encode_array([key, value]))
+    finally:
+        waiter_event.set()
+    return True
+
+
 def _dispatch_array_command(connection: socket.socket, array: list) -> None:
     """Handle RESP Array-based commands like PING and ECHO."""
     if not array:
@@ -446,6 +544,10 @@ def _dispatch_array_command(connection: socket.socket, array: list) -> None:
 
     if cmd == b"LPOP" and len(array) >= 2:
         _handle_lpop(connection, array)
+        return
+
+    if cmd == b"BLPOP" and len(array) >= 3:
+        _handle_blpop(connection, array)
         return
 
 
