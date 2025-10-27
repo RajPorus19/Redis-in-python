@@ -399,6 +399,10 @@ def _dispatch_array_command(connection: socket.socket, array: list) -> None:
         _handle_lrange(connection, array)
         return
 
+    if cmd == b"LLEN" and len(array) >= 2:
+        _handle_llen(connection, array)
+        return
+
 
 def _process_frame(connection: socket.socket, frame) -> None:
     """Process a single RESP frame and respond if it's a recognized command."""
