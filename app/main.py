@@ -250,7 +250,7 @@ def _handle_get(connection: socket.socket, array: list) -> None:
         connection.sendall(_encode_bulk_string(None))
 
 
-def _handle_rpush(connection: socket.socket, array: list) -> None:
+def _handle_push(connection: socket.socket, array: list, command: str) -> None:
     """Handle RPUSH for creating/appending with one or more elements.
 
     Supports: RPUSH <key> <element1> [element2 ...].
@@ -286,10 +286,23 @@ def _handle_rpush(connection: socket.socket, array: list) -> None:
         if lst is None:
             lst = []
             _list_store[key] = lst
-        lst.extend(elements)
+        if command == "RPUSH":
+            lst.extend(elements)
+        elif command == "LPUSH":
+            lst.insert(0, elements)
+        else:
+            raise ValueError(f"Unknown command: {command}")
         new_len = len(lst)
 
     connection.sendall(_encode_integer(new_len))
+
+
+def _handle_rpush(connection: socket.socket, array: list) -> None:
+    _handle_push(connection, array, "RPUSH")
+
+
+def _handle_lpush(connection: socket.socket, array: list) -> None:
+    _handle_push(connection, array, "LPUSH")
 
 
 def _handle_lrange(connection: socket.socket, array: list) -> None:
@@ -356,6 +369,10 @@ def _dispatch_array_command(connection: socket.socket, array: list) -> None:
 
     if cmd == b"RPUSH" and len(array) >= 3:
         _handle_rpush(connection, array)
+        return
+
+    if cmd == b"LPUSH" and len(array) >= 3:
+        _handle_lpush(connection, array)
         return
 
     if cmd == b"LRANGE" and len(array) >= 4:
