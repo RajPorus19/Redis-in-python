@@ -1,8 +1,10 @@
 import socket
+import time
 import threading
 
 # In-memory key-value store for SET/GET
 _kv_store: dict[bytes, bytes] = {}
+_kv_expiry: dict[bytes, float] = {}
 _kv_lock = threading.Lock()
 
 
@@ -138,6 +140,49 @@ def _handle_echo(connection: socket.socket, array: list) -> None:
         connection.sendall(_encode_bulk_string(None))
 
 
+def _parse_set_expiry_ms(array: list, start_index: int = 3) -> int | None:
+    """Parse PX/EX options for SET and return expiry in milliseconds if provided.
+
+    The function is tolerant of unknown/invalid options and values, and will
+    consider the last valid PX/EX option seen.
+    """
+    expiry_ms: int | None = None
+    i = start_index
+    while i < len(array):
+        opt_raw = array[i]
+        if not isinstance(opt_raw, (bytes, bytearray)):
+            i += 1
+            continue
+        opt = bytes(opt_raw).upper()
+
+        # PX <ms>
+        if opt == b"PX" and i + 1 < len(array):
+            next_raw = array[i + 1]
+            if isinstance(next_raw, (bytes, bytearray)):
+                try:
+                    expiry_ms = int(bytes(next_raw))
+                except ValueError:
+                    pass
+            i += 2
+            continue
+
+        # EX <seconds>
+        if opt == b"EX" and i + 1 < len(array):
+            next_raw = array[i + 1]
+            if isinstance(next_raw, (bytes, bytearray)):
+                try:
+                    expiry_ms = int(bytes(next_raw)) * 1000
+                except ValueError:
+                    pass
+            i += 2
+            continue
+
+        # Unknown/unsupported option, skip
+        i += 1
+
+    return expiry_ms
+
+
 def _handle_set(connection: socket.socket, array: list) -> None:
     if len(array) < 3:
         # Minimal error handling: reply OK to stay permissive
@@ -150,8 +195,16 @@ def _handle_set(connection: socket.socket, array: list) -> None:
     ):
         key = bytes(key_raw)
         value = bytes(val_raw)
+        # Parse optional PX/EX arguments into milliseconds
+        expiry_ms: int | None = _parse_set_expiry_ms(array)
+
         with _kv_lock:
             _kv_store[key] = value
+            if expiry_ms is not None and expiry_ms >= 0:
+                _kv_expiry[key] = time.time() + (expiry_ms / 1000.0)
+            else:
+                # Clear any previous expiry if no expiry provided in this SET
+                _kv_expiry.pop(key, None)
         connection.sendall(_encode_simple_string(b"OK"))
     else:
         connection.sendall(_encode_simple_string(b"OK"))
@@ -165,7 +218,14 @@ def _handle_get(connection: socket.socket, array: list) -> None:
     if isinstance(key_raw, (bytes, bytearray)):
         key = bytes(key_raw)
         with _kv_lock:
-            value = _kv_store.get(key)
+            # Check expiry and purge if necessary
+            deadline = _kv_expiry.get(key)
+            if deadline is not None and time.time() >= deadline:
+                _kv_store.pop(key, None)
+                _kv_expiry.pop(key, None)
+                value = None
+            else:
+                value = _kv_store.get(key)
         connection.sendall(_encode_bulk_string(value if value is not None else None))
     else:
         connection.sendall(_encode_bulk_string(None))
