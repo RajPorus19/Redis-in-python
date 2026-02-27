@@ -424,7 +424,7 @@ def _handle_xadd(connection: socket.socket, array: list) -> None:
         _stream_store[stream_key] = []
 
     _stream_store[stream_key].append({element_id: {}})
-    connection.sendall(_encode_simple_string(element_id))
+    connection.sendall(_encode_bulk_string(element_id))
 
 def _dispatch_array_command(connection: socket.socket, array: list) -> None:
     """Handle RESP Array-based commands like PING and ECHO."""
