@@ -372,12 +372,33 @@ def _try_wake_blpop_waiter(key: bytes) -> bool:
 
 def _handle_type(connection: socket.socket, array: list) -> None:
     if len(array) < 2:
-        connection.sendall(_encode_bulk_string(None))
+        connection.sendall(_encode_simple_string(b"none"))
         return
+
     key_raw = array[1]
     if not isinstance(key_raw, (bytes, bytearray)):
-        return "string"
-    return "none"
+        connection.sendall(_encode_simple_string(b"none"))
+        return
+
+    key = bytes(key_raw)
+
+    # First, check string keys (respecting expiry logic).
+    with _kv_lock:
+        deadline = _kv_expiry.get(key)
+        if deadline is not None and time.time() >= deadline:
+            # Expired – purge and treat as non-existent.
+            _kv_store.pop(key, None)
+            _kv_expiry.pop(key, None)
+            value_exists = False
+        else:
+            value_exists = key in _kv_store
+
+    if value_exists:
+        connection.sendall(_encode_simple_string(b"string"))
+        return
+
+    # No value found for this key.
+    connection.sendall(_encode_simple_string(b"none"))
 
 def _dispatch_array_command(connection: socket.socket, array: list) -> None:
     """Handle RESP Array-based commands like PING and ECHO."""
