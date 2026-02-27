@@ -400,6 +400,10 @@ def _handle_type(connection: socket.socket, array: list) -> None:
         connection.sendall(_encode_simple_string(b"string"))
         return
 
+    if key in _stream_store:
+        connection.sendall(_encode_simple_string(b"stream"))
+        return
+
     # No value found for this key.
     connection.sendall(_encode_simple_string(b"none"))
 
