@@ -370,6 +370,14 @@ def _try_wake_blpop_waiter(key: bytes) -> bool:
         waiter_event.set()
     return True
 
+def _handle_type(connection: socket.socket, array: list) -> None:
+    if len(array) < 2:
+        connection.sendall(_encode_bulk_string(None))
+        return
+    key_raw = array[1]
+    if not isinstance(key_raw, (bytes, bytearray)):
+        return "string"
+    return "none"
 
 def _dispatch_array_command(connection: socket.socket, array: list) -> None:
     """Handle RESP Array-based commands like PING and ECHO."""
@@ -418,6 +426,10 @@ def _dispatch_array_command(connection: socket.socket, array: list) -> None:
 
     if cmd == b"BLPOP" and len(array) >= 3:
         _handle_blpop(connection, array)
+        return
+
+    if cmd == b"TYPE" and len(array) >= 2:
+        _handle_type(connection, array)
         return
 
 
