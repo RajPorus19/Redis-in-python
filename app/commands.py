@@ -418,7 +418,7 @@ def _handle_xadd(connection: socket.socket, array: list) -> None:
         return
     stream_key = bytes(stream_key_raw)
     element_id = bytes(element_id_raw)
-    _stream_store[stream_key].append({element_id: {}})
+    _stream_store[str(stream_key)].append({element_id: {}})
     connection.sendall(_encode_simple_string(element_id))
 
 def _dispatch_array_command(connection: socket.socket, array: list) -> None:
