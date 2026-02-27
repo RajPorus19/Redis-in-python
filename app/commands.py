@@ -24,6 +24,9 @@ _list_lock = threading.Lock()
 _blpop_waiters: dict[bytes, list[tuple[socket.socket, threading.Event]]] = {}
 _blpop_lock = threading.Lock()
 
+# dict for streams
+_stream_store: dict[bytes, list[dict[bytes, bytes]]] = {}
+
 
 def _handle_ping(connection: socket.socket) -> None:
     connection.sendall(_encode_simple_string(b"PONG"))
@@ -382,7 +385,7 @@ def _handle_type(connection: socket.socket, array: list) -> None:
 
     key = bytes(key_raw)
 
-    # First, check string keys (respecting expiry logic).
+    # TODO : this needs to be refactored as it's called in the get and here, and this passive check is repeated
     with _kv_lock:
         deadline = _kv_expiry.get(key)
         if deadline is not None and time.time() >= deadline:
@@ -399,6 +402,24 @@ def _handle_type(connection: socket.socket, array: list) -> None:
 
     # No value found for this key.
     connection.sendall(_encode_simple_string(b"none"))
+
+
+def _handle_xadd(connection: socket.socket, array: list) -> None:
+    if len(array) < 3:
+        connection.sendall(_encode_simple_string(b"none"))
+        return
+    stream_key_raw = array[1]
+    element_id_raw = array[2]
+    if not isinstance(stream_key_raw, (bytes, bytearray)):
+        connection.sendall(_encode_simple_string(b"none"))
+        return
+    if not isinstance(element_id_raw, (bytes, bytearray)):
+        connection.sendall(_encode_simple_string(b"none"))
+        return
+    stream_key = bytes(stream_key_raw)
+    element_id = bytes(element_id_raw)
+    _stream_store[stream_key].append({element_id: {}})
+    connection.sendall(_encode_simple_string(element_id))
 
 def _dispatch_array_command(connection: socket.socket, array: list) -> None:
     """Handle RESP Array-based commands like PING and ECHO."""
@@ -451,6 +472,10 @@ def _dispatch_array_command(connection: socket.socket, array: list) -> None:
 
     if cmd == b"TYPE" and len(array) >= 2:
         _handle_type(connection, array)
+        return
+
+    if cmd == b"XADD" and len(array) >= 3:
+        _handle_xadd(connection, array)
         return
 
 
