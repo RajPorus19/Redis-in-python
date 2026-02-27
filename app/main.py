@@ -1,8 +1,8 @@
 import socket
 import threading
 
-from resp import _consume_next_frame
-from commands import _process_frame
+from .resp import _consume_next_frame
+from .commands import _process_frame
 
 
 def handle_client(connection: socket.socket) -> None:

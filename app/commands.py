@@ -2,7 +2,7 @@ import socket
 import time
 import threading
 
-from resp import (
+from .resp import (
     _encode_simple_string,
     _encode_bulk_string,
     _encode_array,
@@ -294,17 +294,19 @@ def _handle_blpop(connection: socket.socket, array: list) -> None:
         connection.sendall(_encode_null_array())
         return
     key = bytes(key_raw)
-    # Per stage, timeout will be 0 (block indefinitely). Parse but ignore non-zero.
+    # Timeout is specified in seconds and may be fractional (e.g. "0.1").
+    # Parse it as a float; non-numeric values fall back to 0, which we treat
+    # as "block indefinitely".
     if isinstance(timeout_raw, (bytes, bytearray)):
         try:
-            timeout = int(bytes(timeout_raw))
+            timeout = float(bytes(timeout_raw))
         except ValueError:
-            timeout = 0
+            timeout = 0.0
     else:
         try:
-            timeout = int(timeout_raw)
+            timeout = float(timeout_raw)
         except (TypeError, ValueError):
-            timeout = 0
+            timeout = 0.0
 
     # Fast-path: if element exists, pop immediately
     with _list_lock:
@@ -327,8 +329,8 @@ def _handle_blpop(connection: socket.socket, array: list) -> None:
     if timeout == 0:
         event.wait()
         return
-    # For non-zero timeouts (future stages), we could wait with timeout
-    signaled = event.wait(timeout=max(0, timeout))
+    # For non-zero timeouts, wait up to the specified number of seconds.
+    signaled = event.wait(timeout=max(0.0, timeout))
     if not signaled:
         # Timed out: remove ourselves if still queued and reply with null array
         with _blpop_lock:
