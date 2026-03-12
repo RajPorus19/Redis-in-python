@@ -27,6 +27,13 @@ _blpop_lock = threading.Lock()
 # dict for streams
 _stream_store: dict[bytes, list[dict[bytes, bytes]]] = {}
 
+_ERR_XADD_NOT_GREATER = (
+    b"-ERR The ID specified in XADD is equal or smaller than the target stream top item\r\n"
+)
+_ERR_XADD_GREATER_THAN_ZERO = (
+    b"-ERR The ID specified in XADD must be greater than 0-0\r\n"
+)
+
 
 def _handle_ping(connection: socket.socket) -> None:
     connection.sendall(_encode_simple_string(b"PONG"))
@@ -408,6 +415,26 @@ def _handle_type(connection: socket.socket, array: list) -> None:
     connection.sendall(_encode_simple_string(b"none"))
 
 
+def _parse_stream_id(id_bytes: bytes) -> tuple[int, int] | None:
+    """Parse a stream ID of the form '<millisecondsTime>-<sequenceNumber>'."""
+    try:
+        id_str = id_bytes.decode()
+        millis_str, seq_str = id_str.split("-", 1)
+        return int(millis_str), int(seq_str)
+    except Exception:
+        return None
+
+
+def _get_last_stream_id(stream_key: bytes) -> tuple[int, int] | None:
+    """Return the last ID for the given stream key, if any."""
+    entries = _stream_store.get(stream_key)
+    if not entries:
+        return None
+    last_entry = entries[-1]
+    last_id_bytes = next(iter(last_entry.keys()))
+    return _parse_stream_id(last_id_bytes)
+
+
 def _handle_xadd(connection: socket.socket, array: list) -> None:
     if len(array) < 3:
         connection.sendall(_encode_simple_string(b"none"))
@@ -424,8 +451,27 @@ def _handle_xadd(connection: socket.socket, array: list) -> None:
     element_id = bytes(element_id_raw)
 
     # Initialize the stream list for this key if it doesn't exist yet
+    parsed = _parse_stream_id(element_id)
+    if parsed is None:
+        connection.sendall(_ERR_XADD_NOT_GREATER)
+        return
+    new_ms, new_seq = parsed
+
+    if new_ms == 0 and new_seq == 0:
+        connection.sendall(_ERR_XADD_GREATER_THAN_ZERO)
+        return
+
     if stream_key not in _stream_store:
         _stream_store[stream_key] = []
+    else:
+        last = _get_last_stream_id(stream_key)
+        if last is None:
+            connection.sendall(_ERR_XADD_NOT_GREATER)
+            return
+        last_ms, last_seq = last
+        if new_ms < last_ms or (new_ms == last_ms and new_seq <= last_seq):
+            connection.sendall(_ERR_XADD_NOT_GREATER)
+            return
 
     _stream_store[stream_key].append({element_id: {}})
     connection.sendall(_encode_bulk_string(element_id))
