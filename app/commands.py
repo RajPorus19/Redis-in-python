@@ -450,8 +450,28 @@ def _handle_xadd(connection: socket.socket, array: list) -> None:
     stream_key = bytes(stream_key_raw)
     element_id = bytes(element_id_raw)
 
-    # Check if this is auto-sequence format: "<millis>-*"
+    # Check if this is full auto-generate format: "*"
     id_str = element_id.decode()
+    if id_str == "*":
+        new_ms = int(time.time() * 1000)
+        if stream_key not in _stream_store:
+            _stream_store[stream_key] = []
+        entries = _stream_store[stream_key]
+        new_seq = 0
+        for entry in reversed(entries):
+            last_id_bytes = next(iter(entry.keys()))
+            last = _parse_stream_id(last_id_bytes)
+            if last is not None:
+                last_ms, last_seq = last
+                if last_ms == new_ms:
+                    new_seq = last_seq + 1
+                break
+        element_id = f"{new_ms}-{new_seq}".encode()
+        _stream_store[stream_key].append({element_id: {}})
+        connection.sendall(_encode_bulk_string(element_id))
+        return
+
+    # Check if this is auto-sequence format: "<millis>-*"
     auto_seq = id_str.endswith("-*")
 
     if auto_seq:
