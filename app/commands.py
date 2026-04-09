@@ -479,7 +479,13 @@ def _handle_xrange(connection: socket.socket, array: list) -> None:
     end_id = bytes(array[3])
 
     try:
-        start_ms, start_seq = (0, 0) if start_id == b"-" else _parse_range_id(start_id)
+        if start_id == b"-":
+            start_ms, start_seq = 0, 0
+        elif start_id == b"+":
+            start_ms, start_seq = float("inf"), float("inf")
+        else:
+            start_ms, start_seq = _parse_range_id(start_id)
+   
         end_ms, end_seq = _parse_range_id(end_id)
     except (ValueError, UnicodeDecodeError):
         connection.sendall(b"*0\r\n")
