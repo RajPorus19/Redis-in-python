@@ -601,48 +601,57 @@ def _handle_xadd(connection: socket.socket, array: list) -> None:
     connection.sendall(_encode_bulk_string(element_id))
 
 def _handle_xread(connection: socket.socket, array: list) -> None:
-    # Syntax: XREAD STREAMS <key> <id>
-    # array[0]=XREAD, array[1]=STREAMS, array[2]=key, array[3]=id
+    # Syntax: XREAD STREAMS <key1> [key2 ...] <id1> [id2 ...]
+    # array[0]=XREAD, array[1]=STREAMS, then N keys followed by N ids
     if len(array) < 4:
         connection.sendall(b"*0\r\n")
         return
 
-    stream_key = bytes(array[2])
-    exclusive_id = bytes(array[3])
-
-    try:
-        if exclusive_id == b"0" or exclusive_id == b"0-0":
-            excl_ms, excl_seq = 0, -1
-        else:
-            parsed = _parse_stream_id(exclusive_id)
-            if parsed is None:
-                connection.sendall(b"*0\r\n")
-                return
-            excl_ms, excl_seq = parsed
-    except (ValueError, UnicodeDecodeError):
+    rest = [bytes(a) for a in array[2:]]
+    if len(rest) % 2 != 0:
         connection.sendall(b"*0\r\n")
         return
 
-    entries = _stream_store.get(stream_key, [])
-    result = []
-    for entry in entries:
-        entry_id = next(iter(entry.keys()))
-        parsed = _parse_stream_id(entry_id)
-        if parsed is None:
+    n = len(rest) // 2
+    keys = rest[:n]
+    ids = rest[n:]
+
+    stream_items = []
+    for stream_key, exclusive_id in zip(keys, ids):
+        try:
+            if exclusive_id in (b"0", b"0-0"):
+                excl_ms, excl_seq = 0, -1
+            else:
+                parsed = _parse_stream_id(exclusive_id)
+                if parsed is None:
+                    continue
+                excl_ms, excl_seq = parsed
+        except (ValueError, UnicodeDecodeError):
             continue
-        e_ms, e_seq = parsed
-        if (e_ms, e_seq) > (excl_ms, excl_seq):
-            result.append(entry)
 
-    if not result:
+        entries = _stream_store.get(stream_key, [])
+        result = []
+        for entry in entries:
+            entry_id = next(iter(entry.keys()))
+            parsed = _parse_stream_id(entry_id)
+            if parsed is None:
+                continue
+            e_ms, e_seq = parsed
+            if (e_ms, e_seq) > (excl_ms, excl_seq):
+                result.append(entry)
+
+        if not result:
+            continue
+
+        entries_bytes = _encode_xrange_response(result)
+        key_bytes = b"$" + str(len(stream_key)).encode() + b"\r\n" + stream_key + b"\r\n"
+        stream_items.append(b"*2\r\n" + key_bytes + entries_bytes)
+
+    if not stream_items:
         connection.sendall(b"*0\r\n")
         return
 
-    # Encode: *1\r\n *2\r\n <stream_key> <entries_array>
-    entries_bytes = _encode_xrange_response(result)
-    key_bytes = b"$" + str(len(stream_key)).encode() + b"\r\n" + stream_key + b"\r\n"
-    stream_item = b"*2\r\n" + key_bytes + entries_bytes
-    response = b"*1\r\n" + stream_item
+    response = b"*" + str(len(stream_items)).encode() + b"\r\n" + b"".join(stream_items)
     connection.sendall(response)
 
 
