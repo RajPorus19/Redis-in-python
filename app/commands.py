@@ -450,28 +450,58 @@ def _handle_xadd(connection: socket.socket, array: list) -> None:
     stream_key = bytes(stream_key_raw)
     element_id = bytes(element_id_raw)
 
-    # Initialize the stream list for this key if it doesn't exist yet
-    parsed = _parse_stream_id(element_id)
-    if parsed is None:
-        connection.sendall(_ERR_XADD_NOT_GREATER)
-        return
-    new_ms, new_seq = parsed
+    # Check if this is auto-sequence format: "<millis>-*"
+    id_str = element_id.decode()
+    auto_seq = id_str.endswith("-*")
 
-    if new_ms == 0 and new_seq == 0:
-        connection.sendall(_ERR_XADD_GREATER_THAN_ZERO)
-        return
+    if auto_seq:
+        try:
+            new_ms = int(id_str[:-2])  # strip the "-*"
+        except ValueError:
+            connection.sendall(_ERR_XADD_NOT_GREATER)
+            return
 
-    if stream_key not in _stream_store:
-        _stream_store[stream_key] = []
+        if stream_key not in _stream_store:
+            _stream_store[stream_key] = []
+
+        # Find the last entry with the same millis to determine sequence number
+        entries = _stream_store[stream_key]
+        new_seq = 1 if new_ms == 0 else 0  # default starting sequence
+        for entry in reversed(entries):
+            last_id_bytes = next(iter(entry.keys()))
+            last = _parse_stream_id(last_id_bytes)
+            if last is not None:
+                last_ms, last_seq = last
+                if last_ms == new_ms:
+                    new_seq = last_seq + 1
+                    break
+                elif last_ms > new_ms:
+                    # All existing entries have higher millis; use default
+                    break
+
+        element_id = f"{new_ms}-{new_seq}".encode()
     else:
-        last = _get_last_stream_id(stream_key)
-        if last is None:
+        parsed = _parse_stream_id(element_id)
+        if parsed is None:
             connection.sendall(_ERR_XADD_NOT_GREATER)
             return
-        last_ms, last_seq = last
-        if new_ms < last_ms or (new_ms == last_ms and new_seq <= last_seq):
-            connection.sendall(_ERR_XADD_NOT_GREATER)
+        new_ms, new_seq = parsed
+
+        if new_ms == 0 and new_seq == 0:
+            connection.sendall(_ERR_XADD_GREATER_THAN_ZERO)
             return
+
+        if stream_key not in _stream_store:
+            _stream_store[stream_key] = []
+        else:
+            last = _get_last_stream_id(stream_key)
+            if last is None:
+                connection.sendall(_ERR_XADD_NOT_GREATER)
+                return
+            last_ms, last_seq = last
+            if new_ms < last_ms or (new_ms == last_ms and new_seq <= last_seq):
+                connection.sendall(_ERR_XADD_NOT_GREATER)
+                return
 
     _stream_store[stream_key].append({element_id: {}})
     connection.sendall(_encode_bulk_string(element_id))
