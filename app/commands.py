@@ -24,8 +24,8 @@ _list_lock = threading.Lock()
 _blpop_waiters: dict[bytes, list[tuple[socket.socket, threading.Event]]] = {}
 _blpop_lock = threading.Lock()
 
-# dict for streams
-_stream_store: dict[bytes, list[dict[bytes, bytes]]] = {}
+# dict for streams: key -> list of {id_bytes: [field, value, ...]}
+_stream_store: dict[bytes, list[dict[bytes, list[bytes]]]] = {}
 
 _ERR_XADD_NOT_GREATER = (
     b"-ERR The ID specified in XADD is equal or smaller than the target stream top item\r\n"
@@ -435,6 +435,72 @@ def _get_last_stream_id(stream_key: bytes) -> tuple[int, int] | None:
     return _parse_stream_id(last_id_bytes)
 
 
+def _parse_fields(array: list, start: int) -> list[bytes]:
+    """Extract alternating field/value bytes from array starting at index."""
+    fields: list[bytes] = []
+    for item in array[start:]:
+        if isinstance(item, (bytes, bytearray)):
+            fields.append(bytes(item))
+    return fields
+
+
+def _parse_range_id(id_bytes: bytes) -> tuple[int, int | None]:
+    """Parse a range ID. Returns (ms, seq) or (ms, None) if no sequence given.
+
+    None means: match any sequence for that millisecond value.
+    """
+    id_str = id_bytes.decode()
+    if "-" in id_str:
+        ms_str, seq_str = id_str.split("-", 1)
+        return int(ms_str), int(seq_str)
+    return int(id_str), None
+
+
+def _encode_xrange_response(entries: list[dict[bytes, list[bytes]]]) -> bytes:
+    """Encode XRANGE results as a nested RESP array."""
+    parts = [b"*" + str(len(entries)).encode() + b"\r\n"]
+    for entry in entries:
+        entry_id = next(iter(entry.keys()))
+        fields = entry[entry_id]
+        parts.append(b"*2\r\n")
+        parts.append(b"$" + str(len(entry_id)).encode() + b"\r\n" + entry_id + b"\r\n")
+        parts.append(b"*" + str(len(fields)).encode() + b"\r\n")
+        for f in fields:
+            parts.append(b"$" + str(len(f)).encode() + b"\r\n" + f + b"\r\n")
+    return b"".join(parts)
+
+
+def _handle_xrange(connection: socket.socket, array: list) -> None:
+    if len(array) < 4:
+        connection.sendall(b"*0\r\n")
+        return
+    stream_key = bytes(array[1])
+    start_id = bytes(array[2])
+    end_id = bytes(array[3])
+
+    try:
+        start_ms, start_seq = _parse_range_id(start_id)
+        end_ms, end_seq = _parse_range_id(end_id)
+    except (ValueError, UnicodeDecodeError):
+        connection.sendall(b"*0\r\n")
+        return
+
+    start = (start_ms, start_seq if start_seq is not None else 0)
+    end = (end_ms, end_seq if end_seq is not None else float("inf"))
+
+    entries = _stream_store.get(stream_key, [])
+    result = []
+    for entry in entries:
+        entry_id = next(iter(entry.keys()))
+        parsed = _parse_stream_id(entry_id)
+        if parsed is None:
+            continue
+        if start <= parsed <= end:
+            result.append(entry)
+
+    connection.sendall(_encode_xrange_response(result))
+
+
 def _handle_xadd(connection: socket.socket, array: list) -> None:
     if len(array) < 3:
         connection.sendall(_encode_simple_string(b"none"))
@@ -467,7 +533,8 @@ def _handle_xadd(connection: socket.socket, array: list) -> None:
                     new_seq = last_seq + 1
                 break
         element_id = f"{new_ms}-{new_seq}".encode()
-        _stream_store[stream_key].append({element_id: {}})
+        fields = _parse_fields(array, 3)
+        _stream_store[stream_key].append({element_id: fields})
         connection.sendall(_encode_bulk_string(element_id))
         return
 
@@ -523,7 +590,8 @@ def _handle_xadd(connection: socket.socket, array: list) -> None:
                 connection.sendall(_ERR_XADD_NOT_GREATER)
                 return
 
-    _stream_store[stream_key].append({element_id: {}})
+    fields = _parse_fields(array, 3)
+    _stream_store[stream_key].append({element_id: fields})
     connection.sendall(_encode_bulk_string(element_id))
 
 def _dispatch_array_command(connection: socket.socket, array: list) -> None:
@@ -581,6 +649,10 @@ def _dispatch_array_command(connection: socket.socket, array: list) -> None:
 
     if cmd == b"XADD" and len(array) >= 3:
         _handle_xadd(connection, array)
+        return
+
+    if cmd == b"XRANGE" and len(array) >= 4:
+        _handle_xrange(connection, array)
         return
 
 
