@@ -681,6 +681,20 @@ def _handle_xread(connection: socket.socket, array: list) -> None:
     keys = rest[:n]
     ids = rest[n:]
 
+    # Resolve '$' to the current last entry ID for each stream (at command time)
+    if block_ms is not None:
+        resolved_ids = []
+        for key, id_b in zip(keys, ids):
+            if id_b == b"$":
+                last = _get_last_stream_id(key)
+                # If stream is empty/missing, use "0-0" so any future entry matches
+                resolved_ids.append(
+                    f"{last[0]}-{last[1]}".encode() if last is not None else b"0-0"
+                )
+            else:
+                resolved_ids.append(id_b)
+        ids = resolved_ids
+
     # Non-blocking: return immediately
     if block_ms is None:
         response = _xread_query(keys, ids)
