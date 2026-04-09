@@ -486,7 +486,7 @@ def _handle_xrange(connection: socket.socket, array: list) -> None:
         else:
             start_ms, start_seq = _parse_range_id(start_id)
    
-        end_ms, end_seq = _parse_range_id(end_id)
+        end_ms, end_seq = (float("inf"), float("inf")) if end_id == b"+" else _parse_range_id(end_id)
     except (ValueError, UnicodeDecodeError):
         connection.sendall(b"*0\r\n")
         return
