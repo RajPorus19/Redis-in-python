@@ -27,6 +27,10 @@ _blpop_lock = threading.Lock()
 # dict for streams: key -> list of {id_bytes: [field, value, ...]}
 _stream_store: dict[bytes, list[dict[bytes, list[bytes]]]] = {}
 
+# Blocking XREAD waiters: stream_key -> list of threading.Event
+_xread_waiters: dict[bytes, list[threading.Event]] = {}
+_xread_waiters_lock = threading.Lock()
+
 _ERR_XADD_NOT_GREATER = (
     b"-ERR The ID specified in XADD is equal or smaller than the target stream top item\r\n"
 )
@@ -598,24 +602,17 @@ def _handle_xadd(connection: socket.socket, array: list) -> None:
 
     fields = _parse_fields(array, 3)
     _stream_store[stream_key].append({element_id: fields})
+
+    # Wake any blocking XREAD waiters for this stream key
+    with _xread_waiters_lock:
+        waiters = _xread_waiters.pop(stream_key, [])
+    for event in waiters:
+        event.set()
+
     connection.sendall(_encode_bulk_string(element_id))
 
-def _handle_xread(connection: socket.socket, array: list) -> None:
-    # Syntax: XREAD STREAMS <key1> [key2 ...] <id1> [id2 ...]
-    # array[0]=XREAD, array[1]=STREAMS, then N keys followed by N ids
-    if len(array) < 4:
-        connection.sendall(b"*0\r\n")
-        return
-
-    rest = [bytes(a) for a in array[2:]]
-    if len(rest) % 2 != 0:
-        connection.sendall(b"*0\r\n")
-        return
-
-    n = len(rest) // 2
-    keys = rest[:n]
-    ids = rest[n:]
-
+def _xread_query(keys: list[bytes], ids: list[bytes]) -> bytes | None:
+    """Query streams and return encoded response, or None if no results."""
     stream_items = []
     for stream_key, exclusive_id in zip(keys, ids):
         try:
@@ -648,11 +645,79 @@ def _handle_xread(connection: socket.socket, array: list) -> None:
         stream_items.append(b"*2\r\n" + key_bytes + entries_bytes)
 
     if not stream_items:
+        return None
+    return b"*" + str(len(stream_items)).encode() + b"\r\n" + b"".join(stream_items)
+
+
+def _handle_xread(connection: socket.socket, array: list) -> None:
+    # Syntax: XREAD [BLOCK <ms>] STREAMS <key1> [key2 ...] <id1> [id2 ...]
+    if len(array) < 4:
         connection.sendall(b"*0\r\n")
         return
 
-    response = b"*" + str(len(stream_items)).encode() + b"\r\n" + b"".join(stream_items)
-    connection.sendall(response)
+    args = [bytes(a) for a in array[1:]]
+
+    # Detect optional BLOCK argument
+    block_ms: float | None = None
+    streams_idx = 0
+    if args[0].upper() == b"BLOCK":
+        if len(args) < 4:
+            connection.sendall(b"*0\r\n")
+            return
+        try:
+            block_ms = float(args[1])
+        except ValueError:
+            connection.sendall(b"*0\r\n")
+            return
+        streams_idx = 2  # STREAMS keyword is at index 2
+
+    # args[streams_idx] should be "STREAMS"
+    rest = args[streams_idx + 1:]
+    if len(rest) % 2 != 0:
+        connection.sendall(b"*0\r\n")
+        return
+
+    n = len(rest) // 2
+    keys = rest[:n]
+    ids = rest[n:]
+
+    # Non-blocking: return immediately
+    if block_ms is None:
+        response = _xread_query(keys, ids)
+        connection.sendall(response if response is not None else b"*0\r\n")
+        return
+
+    # Blocking path: check immediately first
+    response = _xread_query(keys, ids)
+    if response is not None:
+        connection.sendall(response)
+        return
+
+    # Register a single event for all watched keys
+    event = threading.Event()
+    with _xread_waiters_lock:
+        for key in keys:
+            _xread_waiters.setdefault(key, []).append(event)
+
+    timeout = None if block_ms == 0 else block_ms / 1000.0
+    signaled = event.wait(timeout=timeout)
+
+    # Remove our event from any keys it's still registered under
+    with _xread_waiters_lock:
+        for key in keys:
+            waiters = _xread_waiters.get(key)
+            if waiters is not None:
+                try:
+                    waiters.remove(event)
+                except ValueError:
+                    pass
+
+    if not signaled:
+        connection.sendall(b"*-1\r\n")
+        return
+
+    response = _xread_query(keys, ids)
+    connection.sendall(response if response is not None else b"*-1\r\n")
 
 
 def _dispatch_array_command(connection: socket.socket, array: list) -> None:
